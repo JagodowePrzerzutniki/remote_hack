@@ -76,6 +76,11 @@ class BoardClient:
         path = f"/api/messages?room={urllib.parse.quote(r)}&limit={limit}&since_id={since_id}"
         return self._req(path) or []
 
+    def clear(self, room=None):
+        """Clear all messages in a room."""
+        r = (room or self.room).strip().lower()
+        return self._req(f"/api/messages?room={urllib.parse.quote(r)}", "DELETE")
+
     def rooms(self):
         """List active rooms."""
         return self._req("/api/rooms") or {"rooms": []}
@@ -128,6 +133,11 @@ def main():
     read_p.add_argument("-s", "--server", help="Server URL")
     read_p.add_argument("-r", "--room", help="Room code")
 
+    # clear
+    clear_p = subparsers.add_parser("clear", help="Clear messages in a room")
+    clear_p.add_argument("-s", "--server", help="Server URL")
+    clear_p.add_argument("-r", "--room", help="Room code")
+
     # listen
     listen_p = subparsers.add_parser("listen", help="Stream new messages live")
     listen_p.add_argument("-s", "--server", help="Server URL")
@@ -165,6 +175,11 @@ def main():
         for m in msgs:
             t = time.strftime("%H:%M:%S", time.localtime(m["created_at"]))
             print(f"[{t}] {m['name']}: {m['text']}")
+
+    elif args.command == "clear":
+        client = BoardClient(server=args.server, room=args.room)
+        res = client.clear()
+        print(f"✓ {res.get('message', 'Cleared messages')}")
 
     elif args.command == "listen":
         client = BoardClient(server=args.server, room=args.room)

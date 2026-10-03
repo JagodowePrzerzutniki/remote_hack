@@ -158,6 +158,26 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
 
         self._send_json({"error": "Not found"}, 404)
 
+    def do_DELETE(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        params = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/api/messages":
+            room = params.get("room", [None])[0]
+            db = get_db()
+            with db:
+                if room:
+                    clean_room = room.strip().lower()
+                    db.execute("DELETE FROM messages WHERE room = ?", (clean_room,))
+                else:
+                    db.execute("DELETE FROM messages")
+            self._send_json({"ok": True, "message": f"Cleared messages for {room or 'all rooms'}"})
+            return
+
+        self._send_json({"error": "Not found"}, 404)
+
+
     def log_message(self, format, *args):
         # Silent or minimal logging
         pass
