@@ -1,11 +1,17 @@
-node_modules/
-dist/
+# Local configuration & database files
+.boardrc
 .roomrc
-.env
-.env.*
-.DS_Store
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Binaries & caches
+.bin/
 __pycache__/
 *.py[cod]
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+.DS_Store
+.env
+.env.*
