@@ -4,7 +4,6 @@ const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontext
 const fs = require('fs');
 const path = require('path');
 
-// Load default config
 let serverUrl = process.env.ROOM_SERVER || 'http://localhost:8765';
 let defaultRoom = process.env.ROOM_CODE || 'general';
 let defaultName = process.env.ROOM_NAME || 'AI-Agent';
@@ -19,24 +18,9 @@ if (fs.existsSync(rcPath)) {
   } catch (e) {}
 }
 
-async function request(endpoint, method = 'GET', body = null) {
-  const url = `${serverUrl.replace(/\/$/, '')}${endpoint}`;
-  const options = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
-  if (body) options.body = JSON.stringify(body);
-  const res = await fetch(url, options);
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Server error (${res.status}): ${errText}`);
-  }
-  return res.json();
-}
-
 async function main() {
   const server = new Server(
-    { name: `room-agent-${defaultName}`, version: '1.0.0' },
+    { name: 'hack-room', version: '1.0.0' },
     { capabilities: { tools: {} } }
   );
 
@@ -45,12 +29,12 @@ async function main() {
       tools: [
         {
           name: 'send_message',
-          description: 'Post a text message to the team message board.',
+          description: 'Post a text message to the room message board.',
           inputSchema: {
             type: 'object',
             properties: {
               text: { type: 'string', description: 'The text message to send.' },
-              room: { type: 'string', description: 'Room code (optional, defaults to configured room).' },
+              room: { type: 'string', description: 'Room code (optional).' },
               name: { type: 'string', description: 'Your sender name (optional).' },
             },
             required: ['text'],
@@ -67,29 +51,6 @@ async function main() {
             },
           },
         },
-        {
-          name: 'set_afk',
-          description: 'Set your status to AFK (away from keyboard) or active.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              afk: { type: 'boolean', description: 'True if AFK/busy, false if active/back.' },
-              reason: { type: 'string', description: 'Reason for being AFK (optional).' },
-              room: { type: 'string', description: 'Room code (optional).' },
-            },
-            required: ['afk'],
-          },
-        },
-        {
-          name: 'who_is_here',
-          description: 'See who is currently active or AFK in the room.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              room: { type: 'string', description: 'Room code (optional).' },
-            },
-          },
-        },
       ],
     };
   });
@@ -98,39 +59,25 @@ async function main() {
     const { name, arguments: args } = req.params;
     const room = (args.room || defaultRoom).trim().toLowerCase();
     const sender = (args.name || defaultName).trim();
+    const base = serverUrl.replace(/\/$/, '');
 
     try {
       if (name === 'send_message') {
-        const res = await request(`/api/rooms/${encodeURIComponent(room)}/messages`, 'POST', {
-          name: sender,
-          text: args.text,
+        const res = await fetch(`${base}/api/rooms/${encodeURIComponent(room)}/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: sender, text: args.text }),
         });
-        return { content: [{ type: 'text', text: `Sent to [${room}] ${sender}: ${res.text}` }] };
+        const json = await res.json();
+        return { content: [{ type: 'text', text: `Sent to [${room}] ${sender}: ${json.text}` }] };
       }
 
       if (name === 'read_messages') {
         const limit = args.limit || 20;
-        const msgs = await request(`/api/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`);
+        const res = await fetch(`${base}/api/rooms/${encodeURIComponent(room)}/messages?limit=${limit}`);
+        const msgs = await res.json();
         const formatted = msgs.map((m) => `[${new Date(m.time).toLocaleTimeString()}] ${m.name}: ${m.text}`).join('\n');
         return { content: [{ type: 'text', text: formatted || 'No messages in room.' }] };
-      }
-
-      if (name === 'set_afk') {
-        const res = await request(`/api/rooms/${encodeURIComponent(room)}/afk`, 'POST', {
-          name: sender,
-          afk: args.afk,
-          reason: args.reason || '',
-        });
-        const status = res.member.afk ? `AFK (${res.member.afkReason})` : 'ACTIVE';
-        return { content: [{ type: 'text', text: `${sender} is now ${status} in room '${room}'.` }] };
-      }
-
-      if (name === 'who_is_here') {
-        const data = await request(`/api/rooms/${encodeURIComponent(room)}/members`);
-        const formatted = (data.members || [])
-          .map((m) => `- ${m.name}: ${m.afk ? `[AFK - ${m.afkReason || 'idle'}]` : '[ACTIVE]'} (seen ${m.lastSeenSecondsAgo}s ago)`)
-          .join('\n');
-        return { content: [{ type: 'text', text: `Room '${room}' members:\n${formatted || '(No members)'}` }] };
       }
 
       throw new Error(`Unknown tool: ${name}`);

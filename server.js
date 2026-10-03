@@ -5,22 +5,8 @@ const { WebSocketServer, WebSocket } = require('ws');
 const { startTunnel } = require('untun');
 
 const PORT = parseInt(process.env.PORT || '8765', 10);
-const AFK_TIMEOUT_MS = 60 * 1000; // 1 minute without heartbeat = auto AFK
-
-// In-memory data store per room
-// rooms[roomCode] = { messages: [], members: { [name]: { name, afk, afkReason, lastSeen } } }
-const rooms = new Map();
-
-function getRoom(code) {
-  const cleanCode = (code || 'default').trim().toLowerCase();
-  if (!rooms.has(cleanCode)) {
-    rooms.set(cleanCode, {
-      messages: [],
-      members: new Map(),
-    });
-  }
-  return rooms.get(cleanCode);
-}
+const rooms = new Map(); // roomCode -> [ { id, name, text, time } ]
+const wsClients = new Map(); // roomCode -> Set<WebSocket>
 
 const app = express();
 app.use(cors());
@@ -29,15 +15,17 @@ app.use(express.json());
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// WebSocket connections by room
-// wsClients[roomCode] = Set<WebSocket>
-const wsClients = new Map();
+function getMessages(room) {
+  const code = (room || 'general').trim().toLowerCase();
+  if (!rooms.has(code)) rooms.set(code, []);
+  return rooms.get(code);
+}
 
-function broadcastToRoom(roomCode, data) {
-  const cleanCode = roomCode.trim().toLowerCase();
-  const clients = wsClients.get(cleanCode);
+function broadcast(room, msg) {
+  const code = (room || 'general').trim().toLowerCase();
+  const clients = wsClients.get(code);
   if (!clients) return;
-  const payload = JSON.stringify(data);
+  const payload = JSON.stringify(msg);
   for (const ws of clients) {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(payload);
@@ -45,99 +33,8 @@ function broadcastToRoom(roomCode, data) {
   }
 }
 
-// REST API
-
 // Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', roomsCount: rooms.size });
-});
-
-// Join room / register name
-app.post('/api/rooms/:room/join', (req, res) => {
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'Name is required' });
-
-  const room = getRoom(req.params.room);
-  const cleanName = name.trim();
-  const member = {
-    name: cleanName,
-    afk: false,
-    afkReason: '',
-    lastSeen: Date.now(),
-  };
-  room.members.set(cleanName, member);
-
-  broadcastToRoom(req.params.room, {
-    type: 'MEMBER_JOIN',
-    room: req.params.room,
-    member,
-  });
-
-  res.json({ ok: true, member });
-});
-
-// Heartbeat
-app.post('/api/rooms/:room/heartbeat', (req, res) => {
-  const { name } = req.body;
-  if (!name) return res.status(400).json({ error: 'Name is required' });
-
-  const room = getRoom(req.params.room);
-  const cleanName = name.trim();
-  const member = room.members.get(cleanName) || {
-    name: cleanName,
-    afk: false,
-    afkReason: '',
-    lastSeen: Date.now(),
-  };
-
-  member.lastSeen = Date.now();
-  room.members.set(cleanName, member);
-
-  res.json({ ok: true });
-});
-
-// Set AFK
-app.post('/api/rooms/:room/afk', (req, res) => {
-  const { name, afk, reason } = req.body;
-  if (!name) return res.status(400).json({ error: 'Name is required' });
-
-  const room = getRoom(req.params.room);
-  const cleanName = name.trim();
-  const member = room.members.get(cleanName) || { name: cleanName, lastSeen: Date.now() };
-
-  member.afk = afk !== false; // defaults to true if not specified
-  member.afkReason = reason || '';
-  member.lastSeen = Date.now();
-  room.members.set(cleanName, member);
-
-  broadcastToRoom(req.params.room, {
-    type: 'AFK_UPDATE',
-    room: req.params.room,
-    member,
-  });
-
-  res.json({ ok: true, member });
-});
-
-// Get room members & AFK status
-app.get('/api/rooms/:room/members', (req, res) => {
-  const room = getRoom(req.params.room);
-  const now = Date.now();
-  const list = [];
-
-  for (const m of room.members.values()) {
-    // If not seen in 60s, automatically consider AFK
-    const isAfk = m.afk || (now - m.lastSeen > AFK_TIMEOUT_MS);
-    list.push({
-      name: m.name,
-      afk: isAfk,
-      afkReason: m.afkReason || (now - m.lastSeen > AFK_TIMEOUT_MS ? 'idle timeout' : ''),
-      lastSeenSecondsAgo: Math.floor((now - m.lastSeen) / 1000),
-    });
-  }
-
-  res.json({ room: req.params.room, members: list });
-});
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 // Send message
 app.post('/api/rooms/:room/messages', (req, res) => {
@@ -146,81 +43,42 @@ app.post('/api/rooms/:room/messages', (req, res) => {
     return res.status(400).json({ error: 'name and text are required' });
   }
 
-  const room = getRoom(req.params.room);
-  const cleanName = name.trim();
-
-  // Update member lastSeen & remove AFK when sending message
-  const member = room.members.get(cleanName) || { name: cleanName, afk: false, afkReason: '', lastSeen: Date.now() };
-  member.lastSeen = Date.now();
-  member.afk = false;
-  member.afkReason = '';
-  room.members.set(cleanName, member);
-
+  const room = req.params.room.trim().toLowerCase();
+  const msgs = getMessages(room);
   const msg = {
-    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-    room: req.params.room,
-    name: cleanName,
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    room,
+    name: name.trim(),
     text: String(text).trim(),
     time: Date.now(),
   };
 
-  room.messages.push(msg);
-  if (room.messages.length > 500) {
-    room.messages.shift();
-  }
+  msgs.push(msg);
+  if (msgs.length > 500) msgs.shift();
 
-  broadcastToRoom(req.params.room, {
-    type: 'MESSAGE',
-    room: req.params.room,
-    message: msg,
-  });
-
+  broadcast(room, msg);
   res.json(msg);
 });
 
 // Read messages
 app.get('/api/rooms/:room/messages', (req, res) => {
-  const room = getRoom(req.params.room);
+  const room = req.params.room.trim().toLowerCase();
   const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
-  const since = parseInt(req.query.since || '0', 10);
-
-  let msgs = room.messages;
-  if (since > 0) {
-    msgs = msgs.filter((m) => m.time > since);
-  }
-
+  const msgs = getMessages(room);
   res.json(msgs.slice(-limit));
 });
 
-// WebSocket Server for live message streaming
+// WebSocket live streaming
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, 'http://localhost');
-  const roomCode = (url.searchParams.get('room') || 'default').trim().toLowerCase();
-  const name = url.searchParams.get('name');
+  const room = (url.searchParams.get('room') || 'general').trim().toLowerCase();
 
-  if (!wsClients.has(roomCode)) {
-    wsClients.set(roomCode, new Set());
-  }
-  const clients = wsClients.get(roomCode);
+  if (!wsClients.has(room)) wsClients.set(room, new Set());
+  const clients = wsClients.get(room);
   clients.add(ws);
 
-  if (name) {
-    const room = getRoom(roomCode);
-    const member = room.members.get(name) || { name, afk: false, afkReason: '', lastSeen: Date.now() };
-    member.lastSeen = Date.now();
-    room.members.set(name, member);
-  }
-
-  ws.on('close', () => {
-    clients.delete(ws);
-    if (clients.size === 0) {
-      wsClients.delete(roomCode);
-    }
-  });
-
-  ws.on('error', () => {
-    clients.delete(ws);
-  });
+  ws.on('close', () => clients.delete(ws));
+  ws.on('error', () => clients.delete(ws));
 });
 
 async function startServer(enableTunnel = false) {
@@ -246,15 +104,11 @@ async function startServer(enableTunnel = false) {
 if (require.main === module) {
   const enableTunnel = process.argv.includes('--public');
   startServer(enableTunnel).then(({ localUrl, publicUrl }) => {
-    console.log(`\n📡 Simple Message Board Relay is running!\n`);
+    console.log(`\n📡 Room Server running!`);
     console.log(`Local:  ${localUrl}`);
-    if (publicUrl) {
-      console.log(`Public: ${publicUrl}  <-- Share this with colleagues on other networks!`);
-    }
-    console.log(`\nCommands:`);
-    console.log(`  node cli.js send --server ${publicUrl || localUrl} --room hack1 --name Kacper "hello"`);
-    console.log(`  node cli.js listen --server ${publicUrl || localUrl} --room hack1\n`);
+    if (publicUrl) console.log(`Public: ${publicUrl}  <-- Share with your team`);
+    console.log();
   });
 }
 
-module.exports = { startServer, app, server };
+module.exports = { startServer, app };
