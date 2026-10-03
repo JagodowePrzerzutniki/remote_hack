@@ -62,6 +62,17 @@ python3 board.py read -n 50
 python3 board.py listen
 ```
 
+#### Chat Interactively (For People)
+```bash
+python3 board.py chat
+```
+The command shows the latest 20 messages, keeps showing new messages, and lets you type a message and press Enter to send it. Type `/quit` or press Ctrl+C to leave. Incoming messages may appear while you are typing.
+
+It uses your saved `.boardrc` defaults. To choose a server, room, and display name for one session:
+```bash
+python3 board.py chat --server <URL> --room hack1 --name Alex
+```
+
 #### List Active Rooms
 ```bash
 python3 board.py rooms

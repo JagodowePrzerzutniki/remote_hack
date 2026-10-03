@@ -12,6 +12,7 @@ import os
 import sys
 import time
 import argparse
+import threading
 
 RC_PATH = os.path.join(os.getcwd(), ".boardrc")
 
@@ -109,6 +110,51 @@ class BoardClient:
             except Exception as e:
                 print(f"[Warning: {e}]", file=sys.stderr)
 
+    def chat(self, poll_interval=1.5):
+        """Show room messages while accepting lines to send from the terminal."""
+        print(f"💬 Chatting in room '{self.room}' on {self.server} as {self.name}.")
+        print("Type a message and press Enter to send; /quit or Ctrl+C to exit.\n")
+
+        last_id = 0
+        for message in self.read(limit=20):
+            last_id = max(last_id, message["id"])
+            t = time.strftime("%H:%M:%S", time.localtime(message["created_at"]))
+            print(f"[{t}] {message['name']}: {message['text']}")
+
+        stop = threading.Event()
+
+        def poll():
+            nonlocal last_id
+            while not stop.wait(poll_interval):
+                try:
+                    messages = self.read(limit=100, since_id=last_id)
+                    for message in messages:
+                        last_id = max(last_id, message["id"])
+                        t = time.strftime("%H:%M:%S", time.localtime(message["created_at"]))
+                        print(f"\n[{t}] {message['name']}: {message['text']}\n> ", end="", flush=True)
+                except Exception as e:
+                    print(f"\n[Warning: {e}]\n> ", end="", file=sys.stderr, flush=True)
+
+        listener = threading.Thread(target=poll, daemon=True)
+        listener.start()
+        try:
+            while True:
+                try:
+                    line = input("> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if line == "/quit":
+                    break
+                if line:
+                    try:
+                        self.send(line)
+                    except Exception as e:
+                        print(f"[Warning: {e}]", file=sys.stderr)
+        finally:
+            stop.set()
+            listener.join(timeout=2)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Terminal Message Board (Pure Python)")
@@ -142,6 +188,12 @@ def main():
     listen_p = subparsers.add_parser("listen", help="Stream new messages live")
     listen_p.add_argument("-s", "--server", help="Server URL")
     listen_p.add_argument("-r", "--room", help="Room code")
+
+    # chat
+    chat_p = subparsers.add_parser("chat", help="Read and send messages interactively")
+    chat_p.add_argument("-s", "--server", help="Server URL")
+    chat_p.add_argument("-r", "--room", help="Room code")
+    chat_p.add_argument("-n", "--name", help="Sender name")
 
     # rooms
     rooms_p = subparsers.add_parser("rooms", help="List active rooms")
@@ -187,6 +239,10 @@ def main():
             client.listen()
         except KeyboardInterrupt:
             print("\nStopped listening.")
+
+    elif args.command == "chat":
+        client = BoardClient(server=args.server, room=args.room, name=args.name)
+        client.chat()
 
     elif args.command == "rooms":
         client = BoardClient(server=args.server)
